@@ -1,8 +1,7 @@
 //! Dense univariate polynomials over the Goldilocks field.
 //!
 //! Coefficients are stored lowest-degree first. `mul` dispatches to the
-//! NTT-based multiplication in `ntt.rs`; `naive_mul` (schoolbook, O(n^2)) is
-//! kept around specifically to cross-check the NTT path in tests.
+
 
 use crate::field::Fp;
 use crate::ntt;
@@ -57,8 +56,7 @@ impl Poly {
         Poly::new(self.coeffs.iter().map(|&x| x * c).collect())
     }
 
-    /// Schoolbook O(n^2) multiplication. Only used to cross-check `mul` in
-    /// tests and for polynomials small enough that NTT overhead isn't worth it.
+    /// O(n^2) multiplication. Only used to cross-check `mul` in
     pub fn naive_mul(&self, other: &Poly) -> Poly {
         if self.is_zero() || other.is_zero() {
             return Poly::zero();
@@ -81,7 +79,6 @@ impl Poly {
     }
 
     /// Polynomial long division: `self = quotient * divisor + remainder`,
-    /// with `deg(remainder) < deg(divisor)`.
     pub fn div_rem(&self, divisor: &Poly) -> (Poly, Poly) {
         assert!(!divisor.is_zero(), "division by the zero polynomial");
         let div_deg = divisor.degree().unwrap();
@@ -107,9 +104,7 @@ impl Poly {
         (Poly::new(quotient), Poly::new(remainder))
     }
 
-    /// Lagrange interpolation through arbitrary (x, y) pairs. O(n^2) — fine
-    /// for boundary-constraint-sized point sets; full trace columns go
-    /// through `ntt::interpolate_subgroup` instead.
+    /// Lagrange interpolation through arbitrary (x, y) pairs. O(n^2)
     pub fn interpolate(points: &[(Fp, Fp)]) -> Poly {
         let mut result = Poly::zero();
         for (i, &(xi, yi)) in points.iter().enumerate() {

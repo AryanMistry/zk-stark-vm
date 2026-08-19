@@ -2,15 +2,11 @@
 //! polynomial operations built on top of it: fast multiplication, subgroup
 //! interpolation, and coset low-degree extension.
 //!
-//! `p - 1 = 2^32 * (2^32 - 1)`, so F_p* has a subgroup of order 2^k for
-//! every k <= 32 — plenty of room for any realistic trace length.
+//! `p - 1 = 2^32 * (2^32 - 1)`, so F_p* has a subgroup of order 2^k for every k <= 32 
 
 use crate::field::{Fp, P};
 use crate::poly::Poly;
 
-/// 7 is known to generate a subgroup whose order has 2-adic valuation
-/// exactly 32 (the maximum possible, since that's the 2-adic valuation of
-/// p - 1 itself). Verified in tests below rather than just asserted here.
 const MULTIPLICATIVE_GENERATOR: Fp = Fp(7);
 pub const TWO_ADICITY: u32 = 32;
 
@@ -44,7 +40,7 @@ pub fn coset_domain(log_n: u32, offset: Fp) -> Vec<Fp> {
 fn bit_reverse_permute(a: &mut [Fp]) {
     let n = a.len();
     if n <= 1 {
-        return; // nothing to permute; also avoids a 32-bit shift overflow below
+        return; 
     }
     let bits = n.trailing_zeros();
     for i in 0..n {
@@ -99,16 +95,14 @@ pub fn intt(a: &mut [Fp]) {
     ntt_core(a, true);
 }
 
-/// Interpolates evaluations over the size-n subgroup domain back into a
-/// polynomial. `evals.len()` must be a power of two.
+/// Interpolates evaluations over the size-n subgroup domain back into a polynomial. `evals.len()` must be a power of two.
 pub fn interpolate_subgroup(evals: &[Fp]) -> Poly {
     let mut coeffs = evals.to_vec();
     intt(&mut coeffs);
     Poly::new(coeffs)
 }
 
-/// Multiplies two polynomials via NTT: pads to the next power of two large
-/// enough to hold the product, transforms, multiplies pointwise, inverts.
+/// Multiplies two polynomials via NTT: pads to the next power of two large enough to hold the product, transforms, multiplies pointwise, inverts.
 pub fn poly_mul_ntt(a: &Poly, b: &Poly) -> Poly {
     if a.is_zero() || b.is_zero() {
         return Poly::zero();
@@ -134,10 +128,6 @@ pub fn poly_mul_ntt(a: &Poly, b: &Poly) -> Poly {
 
 /// Low-degree extension: evaluates `poly` over the coset
 /// `{offset * w^i : i in 0..2^log_l}` without evaluating point-by-point.
-///
-/// Uses the standard substitution q(x) = poly(offset * x), whose
-/// coefficients are `c_i * offset^i`; NTT-evaluating q over the plain
-/// subgroup domain gives poly evaluated over the coset.
 pub fn coset_lde(poly: &Poly, log_l: u32, offset: Fp) -> Vec<Fp> {
     let l = 1usize << log_l;
     assert!(
@@ -168,9 +158,6 @@ mod tests {
 
     #[test]
     fn generator_has_full_2_adic_order() {
-        // If g^((p-1)/2) == 1, g is a quadratic residue and its order's
-        // 2-adic valuation is < 32, which would make it unsuitable as the
-        // basis for a 2^32-order root of unity.
         let half = MULTIPLICATIVE_GENERATOR.pow((P - 1) / 2);
         assert_ne!(half, Fp::ONE, "generator is a QR; can't derive a 2^32 root of unity from it");
     }
