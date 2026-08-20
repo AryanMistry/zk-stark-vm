@@ -5,6 +5,7 @@
 //! vice versa) to forge a path.
 
 use crate::field::Fp;
+use serde::{Deserialize, Serialize};
 
 const LEAF_TAG: u8 = 0x00;
 const NODE_TAG: u8 = 0x01;
@@ -75,7 +76,7 @@ impl MerkleTree {
 /// An authentication path. Verification recomputes the leaf hash from the
 /// claimed values, so a proof is only meaningful together with the leaf
 /// values it's checked against — it doesn't carry them itself.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MerkleProof {
     pub index: usize,
     pub siblings: Vec<Digest>,
