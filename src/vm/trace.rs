@@ -16,7 +16,11 @@ pub const COL_VAL_A_INV: usize = COL_VAL_A + 1;
 pub const COL_VAL_B: usize = COL_VAL_A_INV + 1;
 pub const COL_WRITE_VALUE: usize = COL_VAL_B + 1;
 pub const COL_TARGET: usize = COL_WRITE_VALUE + 1;
-pub const TRACE_WIDTH: usize = COL_TARGET + 1;
+pub const COL_PROG_SEL: usize = COL_TARGET + 1;
+
+pub fn trace_width(program_len: usize) -> usize {
+    COL_PROG_SEL + program_len
+}
 
 pub struct TraceTable {
     pub rows: Vec<Vec<Fp>>,
@@ -39,6 +43,7 @@ pub fn generate_trace(program: &[Instruction], input: Fp) -> (TraceTable, Fp) {
     memory[0] = input;
     let mut pc: usize = 0;
 
+    let width = trace_width(program.len());
     let mut rows = Vec::new();
     loop {
         let instr = program[pc];
@@ -66,7 +71,7 @@ pub fn generate_trace(program: &[Instruction], input: Fp) -> (TraceTable, Fp) {
             Opcode::Halt => (Fp::ZERO, None, pc),
         };
 
-        let mut row = vec![Fp::ZERO; TRACE_WIDTH];
+        let mut row = vec![Fp::ZERO; width];
         row[COL_PC] = Fp::new(pc as u64);
         row[COL_REG..COL_REG + NUM_REGISTERS].copy_from_slice(&registers);
         row[COL_MEM..COL_MEM + NUM_MEMORY].copy_from_slice(&memory);
@@ -82,6 +87,7 @@ pub fn generate_trace(program: &[Instruction], input: Fp) -> (TraceTable, Fp) {
         row[COL_VAL_B] = val_b;
         row[COL_WRITE_VALUE] = write_value;
         row[COL_TARGET] = instr.target;
+        row[COL_PROG_SEL + pc] = Fp::ONE;
         rows.push(row);
 
         if let Some(dst) = instr.dst {

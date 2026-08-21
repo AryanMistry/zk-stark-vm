@@ -4,7 +4,7 @@
 
 
 use super::trace::*;
-use super::{NUM_MEMORY, NUM_REGISTERS, Opcode};
+use super::{Instruction, NUM_MEMORY, NUM_REGISTERS, Opcode, REG_ZERO};
 use crate::air::{Air, BoundaryConstraint};
 use crate::field::Fp;
 
@@ -12,6 +12,28 @@ pub struct VmAir {
     pub input: Fp,
     pub output: Fp,
     pub last_row: usize,
+    program: Vec<Instruction>,
+    // Precomputed once per program: the
+    // constant vector, indexed by program address, that each instruction
+    // field's fetch-consistency constraint dot-products against.
+    prog_opcode: Vec<Fp>,
+    prog_dst: Vec<Fp>,
+    prog_a: Vec<Fp>,
+    prog_b: Vec<Fp>,
+    prog_target: Vec<Fp>,
+    prog_index: Vec<Fp>,
+}
+
+impl VmAir {
+    pub fn new(program: Vec<Instruction>, input: Fp, output: Fp, last_row: usize) -> Self {
+        let prog_opcode = program.iter().map(|i| Fp::new(i.opcode.index() as u64)).collect();
+        let prog_dst = program.iter().map(|i| Fp::new(i.dst.unwrap_or(REG_ZERO) as u64)).collect();
+        let prog_a = program.iter().map(|i| Fp::new(i.a as u64)).collect();
+        let prog_b = program.iter().map(|i| Fp::new(i.b as u64)).collect();
+        let prog_target = program.iter().map(|i| i.target).collect();
+        let prog_index = (0..program.len()).map(|k| Fp::new(k as u64)).collect();
+        VmAir { input, output, last_row, program, prog_opcode, prog_dst, prog_a, prog_b, prog_target, prog_index }
+    }
 }
 
 fn op(row: &[Fp], opcode: Opcode) -> Fp {
@@ -24,7 +46,7 @@ fn dot(sel: &[Fp], values: &[Fp]) -> Fp {
 
 impl Air for VmAir {
     fn trace_width(&self) -> usize {
-        TRACE_WIDTH
+        trace_width(self.program.len())
     }
 
     fn transition_constraints(&self, c: &[Fp], n: &[Fp]) -> Vec<Fp> {
@@ -113,6 +135,27 @@ impl Air for VmAir {
             cs.push(n[COL_MEM + k] - expected);
         }
 
+        // --- instruction fetch: bind this row's opcode/operand selectors to
+        // the fixed public program, via a one-hot selector over program
+        // addresses. ---
+        let prog_sel: Vec<Fp> = (0..self.program.len()).map(|k| c[COL_PROG_SEL + k]).collect();
+        for &s in &prog_sel {
+            cs.push(s * (s - Fp::ONE));
+        }
+        cs.push(prog_sel.iter().fold(-Fp::ONE, |acc, &s| acc + s));
+
+        let fetch = |consts: &[Fp]| dot(&prog_sel, consts);
+        cs.push(c[COL_PC] - fetch(&self.prog_index));
+        let opcode_idx = op_flags.iter().enumerate().fold(Fp::ZERO, |acc, (k, &f)| acc + Fp::new(k as u64) * f);
+        cs.push(opcode_idx - fetch(&self.prog_opcode));
+        let dst_idx = dst_sel.iter().enumerate().fold(Fp::ZERO, |acc, (k, &s)| acc + Fp::new(k as u64) * s);
+        cs.push(dst_idx - fetch(&self.prog_dst));
+        let a_idx = a_sel.iter().enumerate().fold(Fp::ZERO, |acc, (k, &s)| acc + Fp::new(k as u64) * s);
+        cs.push(a_idx - fetch(&self.prog_a));
+        let b_idx = b_sel.iter().enumerate().fold(Fp::ZERO, |acc, (k, &s)| acc + Fp::new(k as u64) * s);
+        cs.push(b_idx - fetch(&self.prog_b));
+        cs.push(target - fetch(&self.prog_target));
+
         cs
     }
 
@@ -157,7 +200,7 @@ mod tests {
             let (trace, output) = generate_trace(&program, Fp::new(n));
             assert_eq!(output, Fp::new(fib_reference(n)), "wrong output for n={n}");
 
-            let air = VmAir { input: Fp::new(n), output, last_row: trace.rows.len() - 1 };
+            let air = VmAir::new(program, Fp::new(n), output, trace.rows.len() - 1);
             assert!(check_trace(&air, &trace.rows).is_ok(), "constraint check failed for n={n}");
         }
     }
@@ -168,7 +211,7 @@ mod tests {
         let (mut trace, output) = generate_trace(&program, Fp::new(10));
         trace.rows[3][COL_WRITE_VALUE] += Fp::ONE;
 
-        let air = VmAir { input: Fp::new(10), output, last_row: trace.rows.len() - 1 };
+        let air = VmAir::new(program, Fp::new(10), output, trace.rows.len() - 1);
         assert!(check_trace(&air, &trace.rows).is_err());
     }
 
@@ -177,7 +220,7 @@ mod tests {
         let program = fibonacci_program();
         let (trace, output) = generate_trace(&program, Fp::new(10));
 
-        let air = VmAir { input: Fp::new(10), output: output + Fp::ONE, last_row: trace.rows.len() - 1 };
+        let air = VmAir::new(program, Fp::new(10), output + Fp::ONE, trace.rows.len() - 1);
         assert!(check_trace(&air, &trace.rows).is_err());
     }
 
@@ -188,7 +231,7 @@ mod tests {
         // Flip a second opcode bit on, breaking the "exactly one" invariant.
         trace.rows[0][COL_OP + Opcode::Halt.index()] = Fp::ONE;
 
-        let air = VmAir { input: Fp::new(10), output, last_row: trace.rows.len() - 1 };
+        let air = VmAir::new(program, Fp::new(10), output, trace.rows.len() - 1);
         assert!(check_trace(&air, &trace.rows).is_err());
     }
 
@@ -202,7 +245,22 @@ mod tests {
         let (trace, _output) = generate_trace(&program, Fp::ZERO);
         assert_eq!(trace.rows[1][COL_REG + REG_A], Fp::ONE);
 
-        let air = VmAir { input: Fp::ZERO, output: Fp::ZERO, last_row: trace.rows.len() - 1 };
+        let air = VmAir::new(program, Fp::ZERO, Fp::ZERO, trace.rows.len() - 1);
         assert!(check_trace(&air, &trace.rows).is_ok());
+    }
+
+    #[test]
+    fn wrong_opcode_at_correct_pc_is_rejected() {
+        let program = fibonacci_program();
+        let (mut trace, output) = generate_trace(&program, Fp::new(10));
+        let row = &mut trace.rows[3];
+        let val_a = row[COL_VAL_A];
+        let val_b = row[COL_VAL_B];
+        row[COL_OP + Opcode::Add.index()] = Fp::ZERO;
+        row[COL_OP + Opcode::Sub.index()] = Fp::ONE;
+        row[COL_WRITE_VALUE] = val_a - val_b;
+
+        let air = VmAir::new(program, Fp::new(10), output, trace.rows.len() - 1);
+        assert!(check_trace(&air, &trace.rows).is_err());
     }
 }

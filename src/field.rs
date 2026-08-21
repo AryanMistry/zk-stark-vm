@@ -95,6 +95,26 @@ impl Fp {
     }
 }
 
+/// Inverts every element of `values` (all must be nonzero) using Montgomery's
+/// batch inversion trick.
+pub fn batch_inverse(values: &[Fp]) -> Vec<Fp> {
+    let n = values.len();
+    let mut prefix = Vec::with_capacity(n);
+    let mut acc = Fp::ONE;
+    for &v in values {
+        prefix.push(acc);
+        acc *= v;
+    }
+    let mut acc_inv = acc.inv().expect("batch_inverse requires every input to be nonzero");
+
+    let mut result = vec![Fp::ZERO; n];
+    for i in (0..n).rev() {
+        result[i] = prefix[i] * acc_inv;
+        acc_inv *= values[i];
+    }
+    result
+}
+
 impl Add for Fp {
     type Output = Fp;
     #[inline]
@@ -216,6 +236,20 @@ mod tests {
     }
 
     #[test]
+    fn batch_inverse_matches_individual_inverses() {
+        let values: Vec<Fp> = (1..=20u64).map(Fp::new).collect();
+        let batched = batch_inverse(&values);
+        for (v, inv) in values.iter().zip(&batched) {
+            assert_eq!(*inv, v.inv().unwrap());
+        }
+    }
+
+    #[test]
+    fn batch_inverse_of_empty_is_empty() {
+        assert!(batch_inverse(&[]).is_empty());
+    }
+
+    #[test]
     fn inverse_of_zero_is_none() {
         assert!(Fp::ZERO.inv().is_none());
     }
@@ -280,6 +314,14 @@ mod tests {
         #[test]
         fn sub_then_add_roundtrips(a in arb_fp(), b in arb_fp()) {
             prop_assert_eq!((a - b) + b, a);
+        }
+
+        #[test]
+        fn batch_inverse_matches_naive(values in proptest::collection::vec(1u64..P, 1..30)) {
+            let fps: Vec<Fp> = values.into_iter().map(Fp::new).collect();
+            let batched = batch_inverse(&fps);
+            let naive: Vec<Fp> = fps.iter().map(|v| v.inv().unwrap()).collect();
+            prop_assert_eq!(batched, naive);
         }
     }
 }

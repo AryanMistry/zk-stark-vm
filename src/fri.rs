@@ -54,16 +54,20 @@ pub struct FriProof {
     pub query_proofs: Vec<Vec<FriStepOpening>>,
 }
 
-fn fold_pair(f_x: Fp, f_neg_x: Fp, x: Fp, beta: Fp) -> Fp {
+/// Takes `x`'s inverse directly rather than computing it internally, so
+/// callers folding a whole layer can batch-invert every point's `x` in one
+/// pass instead of paying for `half` separate Fermat inversions.
+fn fold_pair(f_x: Fp, f_neg_x: Fp, x_inv: Fp, beta: Fp) -> Fp {
     let two_inv = Fp::new(2).inv().unwrap();
     let even = (f_x + f_neg_x) * two_inv;
-    let odd = (f_x - f_neg_x) * two_inv * x.inv().expect("domain points are never zero");
+    let odd = (f_x - f_neg_x) * two_inv * x_inv;
     even + beta * odd
 }
 
 fn fold_evaluations(evals: &[Fp], domain: &[Fp], beta: Fp) -> Vec<Fp> {
     let half = evals.len() / 2;
-    (0..half).map(|i| fold_pair(evals[i], evals[i + half], domain[i], beta)).collect()
+    let x_invs = crate::field::batch_inverse(&domain[..half]);
+    (0..half).map(|i| fold_pair(evals[i], evals[i + half], x_invs[i], beta)).collect()
 }
 
 fn next_domain(domain: &[Fp]) -> Vec<Fp> {
@@ -71,21 +75,35 @@ fn next_domain(domain: &[Fp]) -> Vec<Fp> {
     domain[..half].iter().map(|&x| x * x).collect()
 }
 
-/// Runs the FRI commit + query phases and returns the proof. `evals` are
-/// the claimed low-degree function's values over `domain` (typically a
-/// coset LDE produced by `ntt::coset_lde`); both must have the same
-/// power-of-two length, a multiple of `config.blowup_factor`.
-pub fn prove(evals: Vec<Fp>, domain: Vec<Fp>, config: &FriConfig, transcript: &mut Transcript) -> FriProof {
+/// The result of the FRI commit phase: every folded layer's Merkle tree and
+/// evaluations, kept around so queries can be opened against them.
+pub struct FriCommitment {
+    pub layer_roots: Vec<Digest>,
+    pub final_evals: Vec<Fp>,
+    layer_trees: Vec<MerkleTree>,
+    layer_evals: Vec<Vec<Fp>>,
+    /// Size of the first (unfolded) layer — callers need this to sample
+    /// query indices in the right range.
+    pub n0: usize,
+}
+
+/// Runs just the FRI commit phase (repeated folding, one Merkle commitment
+/// per layer, challenges drawn from the transcript as each layer commits).
+/// Split out from `prove` so a caller — the STARK prover — can sample query
+/// indices itself, after this absorbs into the transcript but before
+/// anything else does, and reuse those same indices to open a *different*
+/// commitment (the trace) at consistent positions.
+pub fn commit(evals: Vec<Fp>, domain: Vec<Fp>, config: &FriConfig, transcript: &mut Transcript) -> FriCommitment {
     assert_eq!(evals.len(), domain.len());
     assert!(evals.len().is_power_of_two());
     assert!(evals.len().is_multiple_of(config.blowup_factor));
 
+    let n0 = evals.len();
     let mut cur_evals = evals;
     let mut cur_domain = domain;
     let mut layer_trees: Vec<MerkleTree> = Vec::new();
     let mut layer_evals: Vec<Vec<Fp>> = Vec::new();
     let mut layer_roots = Vec::new();
-    let mut betas = Vec::new();
 
     while cur_evals.len() > config.blowup_factor {
         let leaves: Vec<Vec<Fp>> = cur_evals.iter().map(|&e| vec![e]).collect();
@@ -95,7 +113,6 @@ pub fn prove(evals: Vec<Fp>, domain: Vec<Fp>, config: &FriConfig, transcript: &m
         layer_roots.push(root);
 
         let beta = transcript.challenge_fp();
-        betas.push(beta);
 
         layer_evals.push(cur_evals.clone());
         layer_trees.push(tree);
@@ -109,42 +126,74 @@ pub fn prove(evals: Vec<Fp>, domain: Vec<Fp>, config: &FriConfig, transcript: &m
         transcript.absorb_fp(v);
     }
 
-    let num_layers = layer_roots.len();
-    let n0 = layer_evals.first().map_or(final_evals.len(), |e| e.len());
-
-    let mut query_proofs = Vec::with_capacity(config.num_queries);
-    for _ in 0..config.num_queries {
-        let mut idx = if num_layers == 0 { 0 } else { transcript.challenge_index(n0 / 2) };
-        let mut steps = Vec::with_capacity(num_layers);
-        for l in 0..num_layers {
-            let evals_l = &layer_evals[l];
-            let half = evals_l.len() / 2;
-            let pair_idx = idx % half;
-
-            steps.push(FriStepOpening {
-                even: evals_l[pair_idx],
-                odd: evals_l[pair_idx + half],
-                even_proof: layer_trees[l].open(pair_idx),
-                odd_proof: layer_trees[l].open(pair_idx + half),
-            });
-
-            idx = pair_idx;
-        }
-        query_proofs.push(steps);
-    }
-
-    FriProof { layer_roots, final_evals, query_proofs }
+    FriCommitment { layer_roots, final_evals, layer_trees, layer_evals, n0 }
 }
 
-/// Verifies a FRI proof against the public `domain` (the same one the
-/// prover started from) and `config`. Replays the transcript to
-/// independently derive the same folding challenges and query indices the
-/// prover used.
-pub fn verify(proof: &FriProof, domain: &[Fp], config: &FriConfig, transcript: &mut Transcript) -> bool {
+/// Draws `num_queries` indices in `0..n0/2` from the transcript (or a
+/// single `0` if the input needed no folding layers at all). Must be called
+/// at the same point in both prover's and verifier's transcript sequence:
+/// after everything commit/recompute-challenges absorbed, before anything
+/// else is.
+pub fn sample_query_indices(transcript: &mut Transcript, n0: usize, num_queries: usize) -> Vec<usize> {
+    (0..num_queries).map(|_| if n0 <= 1 { 0 } else { transcript.challenge_index(n0 / 2) }).collect()
+}
+
+/// Opens every committed layer at the given query indices.
+pub fn open(commitment: &FriCommitment, query_indices: &[usize]) -> Vec<Vec<FriStepOpening>> {
+    let num_layers = commitment.layer_roots.len();
+    query_indices
+        .iter()
+        .map(|&start_idx| {
+            let mut idx = start_idx;
+            (0..num_layers)
+                .map(|l| {
+                    let evals_l = &commitment.layer_evals[l];
+                    let half = evals_l.len() / 2;
+                    let pair_idx = idx % half;
+                    let step = FriStepOpening {
+                        even: evals_l[pair_idx],
+                        odd: evals_l[pair_idx + half],
+                        even_proof: commitment.layer_trees[l].open(pair_idx),
+                        odd_proof: commitment.layer_trees[l].open(pair_idx + half),
+                    };
+                    idx = pair_idx;
+                    step
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Runs the full FRI commit + query phases and returns the proof. `evals`
+/// are the claimed low-degree function's values over `domain` (typically a
+/// coset LDE produced by `ntt::coset_lde`); both must have the same
+/// power-of-two length, a multiple of `config.blowup_factor`.
+pub fn prove(evals: Vec<Fp>, domain: Vec<Fp>, config: &FriConfig, transcript: &mut Transcript) -> FriProof {
+    let commitment = commit(evals, domain, config, transcript);
+    let query_indices = sample_query_indices(transcript, commitment.n0, config.num_queries);
+    let query_proofs = open(&commitment, &query_indices);
+    FriProof { layer_roots: commitment.layer_roots, final_evals: commitment.final_evals, query_proofs }
+}
+
+/// Everything the verifier derives from replaying the commit phase: the
+/// per-layer folding challenges and evaluation domains, needed to check
+/// query openings.
+pub struct FriChallenges {
+    betas: Vec<Fp>,
+    domains: Vec<Vec<Fp>>,
+    pub n0: usize,
+}
+
+/// Replays the commit-phase transcript absorption (layer roots, then final
+/// evals) to independently derive the same folding challenges the prover
+/// used, and checks the proof's structure: the right number of layers, and
+/// a final layer that's actually constant (degree 0, the base case FRI
+/// bottoms out on). Returns `None` if anything here is malformed.
+pub fn recompute_challenges(proof: &FriProof, domain: &[Fp], config: &FriConfig, transcript: &mut Transcript) -> Option<FriChallenges> {
     let n0 = domain.len();
     let expected_layers = (n0 / config.blowup_factor).trailing_zeros() as usize;
     if proof.layer_roots.len() != expected_layers {
-        return false;
+        return None;
     }
 
     let mut betas = Vec::with_capacity(proof.layer_roots.len());
@@ -157,11 +206,11 @@ pub fn verify(proof: &FriProof, domain: &[Fp], config: &FriConfig, transcript: &
     }
 
     if proof.final_evals.len() != config.blowup_factor {
-        return false;
+        return None;
     }
-    let Some(&constant) = proof.final_evals.first() else { return false };
+    let &constant = proof.final_evals.first()?;
     if !proof.final_evals.iter().all(|&v| v == constant) {
-        return false;
+        return None;
     }
 
     let num_layers = proof.layer_roots.len();
@@ -172,20 +221,28 @@ pub fn verify(proof: &FriProof, domain: &[Fp], config: &FriConfig, transcript: &
         cur_domain = next_domain(&cur_domain);
     }
 
-    if proof.query_proofs.len() != config.num_queries {
+    Some(FriChallenges { betas, domains, n0 })
+}
+
+/// Checks that every query opening is internally consistent: Merkle proofs
+/// verify against the claimed layer roots, at the positions the query
+/// indices actually imply, and folding each layer's opened pair with its
+/// challenge reproduces the next layer's (or the final layer's) value.
+pub fn verify_queries(proof: &FriProof, challenges: &FriChallenges, query_indices: &[usize]) -> bool {
+    if proof.query_proofs.len() != query_indices.len() {
         return false;
     }
+    let num_layers = proof.layer_roots.len();
 
-    for steps in &proof.query_proofs {
+    for (steps, &start_idx) in proof.query_proofs.iter().zip(query_indices) {
         if steps.len() != num_layers {
             return false;
         }
-        let mut idx = if num_layers == 0 { 0 } else { transcript.challenge_index(n0 / 2) };
+        let mut idx = start_idx;
         let mut expected: Option<Fp> = None;
 
         for (l, step) in steps.iter().enumerate() {
-            let layer_len = domains[l].len();
-            let half = layer_len / 2;
+            let half = challenges.domains[l].len() / 2;
             let pair_idx = idx % half;
 
             if step.even_proof.index != pair_idx || step.odd_proof.index != pair_idx + half {
@@ -205,8 +262,9 @@ pub fn verify(proof: &FriProof, domain: &[Fp], config: &FriConfig, transcript: &
                 }
             }
 
-            let x = domains[l][pair_idx];
-            expected = Some(fold_pair(step.even, step.odd, x, betas[l]));
+            let x = challenges.domains[l][pair_idx];
+            let x_inv = x.inv().expect("domain points are never zero");
+            expected = Some(fold_pair(step.even, step.odd, x_inv, challenges.betas[l]));
             idx = pair_idx;
         }
 
@@ -218,6 +276,18 @@ pub fn verify(proof: &FriProof, domain: &[Fp], config: &FriConfig, transcript: &
     }
 
     true
+}
+
+/// Verifies a FRI proof against the public `domain` (the same one the
+/// prover started from) and `config`. Replays the transcript to
+/// independently derive the same folding challenges and query indices the
+/// prover used.
+pub fn verify(proof: &FriProof, domain: &[Fp], config: &FriConfig, transcript: &mut Transcript) -> bool {
+    let Some(challenges) = recompute_challenges(proof, domain, config, transcript) else {
+        return false;
+    };
+    let query_indices = sample_query_indices(transcript, challenges.n0, config.num_queries);
+    verify_queries(proof, &challenges, &query_indices)
 }
 
 #[cfg(test)]
@@ -345,7 +415,7 @@ mod tests {
         let f_x = p.eval(x);
         let f_neg_x = p.eval(-x);
 
-        let folded = fold_pair(f_x, f_neg_x, x, beta);
+        let folded = fold_pair(f_x, f_neg_x, x.inv().unwrap(), beta);
         let expected = p_even.eval(x * x) + beta * p_odd.eval(x * x);
         assert_eq!(folded, expected);
     }
