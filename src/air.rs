@@ -1,14 +1,7 @@
-//! The `Air` trait: an Algebraic Intermediate Representation for STARKs.
+//! The `Air` trait: a computation as a trace table plus algebraic constraints.
 //!
-//! An AIR describes a computation as a table (the "trace") where every row
-//! is a step of the computation, plus two kinds of algebraic constraints:
-//!
-//! - transition constraints: polynomial relations between a row and the
-//!   next row, which must evaluate to zero for every consecutive pair of
-//!   rows in a valid trace (e.g. "if this row's opcode is ADD, the next
-//!   row's destination register equals the sum of the two operands").
-//! - boundary constraints: a fixed value at a fixed (row, column), pinning
-//!   down public inputs/outputs (e.g. "row 0, column pc == 0").
+//! Transition constraints relate a row to the next and must vanish on every pair;
+//! boundary constraints pin a fixed value at a fixed (row, column).
 
 use crate::field::Fp;
 
@@ -22,12 +15,13 @@ pub struct BoundaryConstraint {
 pub trait Air {
     fn trace_width(&self) -> usize;
 
-    /// Evaluates every transition constraint polynomial at one pair of
-    /// consecutive rows. A trace satisfies the AIR iff every entry is zero
-    /// for every consecutive row pair.
+    /// Evaluates every transition constraint at one pair of consecutive rows.
     fn transition_constraints(&self, current: &[Fp], next: &[Fp]) -> Vec<Fp>;
 
     fn boundary_constraints(&self) -> Vec<BoundaryConstraint>;
+
+    /// Most trace values multiplied together in any one constraint
+    fn max_constraint_degree(&self) -> usize;
 
     fn num_transition_constraints(&self) -> usize {
         let zeros = vec![Fp::ZERO; self.trace_width()];

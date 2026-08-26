@@ -3,19 +3,20 @@
 
 use std::time::Instant;
 
+use zk_stark_vm::air::Air;
 use zk_stark_vm::field::Fp;
 use zk_stark_vm::stark::{StarkConfig, prover, verifier};
 use zk_stark_vm::vm::constraints::VmAir;
 use zk_stark_vm::vm::fibonacci_program;
 use zk_stark_vm::vm::trace::generate_trace;
 
-/// Fibonacci inputs chosen so the padded trace length lands on successive
-/// powers of two (the VM spends ~8 cycles per loop iteration).
+/// Chosen so padded trace lengths land on successive powers of two.
 const INPUTS: [u64; 8] = [5, 10, 30, 60, 125, 250, 500, 1000];
 
 struct Measurement {
     n: u64,
     rows: usize,
+    blowup: usize,
     prove_ms: f64,
     verify_ms: f64,
     proof_bytes: usize,
@@ -37,7 +38,6 @@ fn measure(n: u64, config: &StarkConfig) -> Measurement {
     let rows = trace.rows.len();
     let air = VmAir::new(program, Fp::new(n), output, rows - 1);
 
-
     let _ = prover::prove(&air, &trace.rows, config);
 
     let prove_reps = (4096 / rows).clamp(2, 20);
@@ -53,24 +53,27 @@ fn measure(n: u64, config: &StarkConfig) -> Measurement {
         assert!(verified, "honest proof failed to verify at n={n} — this is a bug");
     });
 
-    Measurement { n, rows, prove_ms, verify_ms, proof_bytes }
+    let blowup = config.lde_blowup(rows, air.max_constraint_degree());
+    Measurement { n, rows, blowup, prove_ms, verify_ms, proof_bytes }
 }
 
 fn main() {
     let out_path = std::env::args().nth(1).unwrap_or_else(|| "benchmark.svg".to_string());
     let config = StarkConfig::toy();
 
-    println!("zk-stark-vm — scaling benchmark\n");
-    println!("{:>6} {:>7} {:>12} {:>12} {:>12}", "n", "rows", "prove", "verify", "proof");
-    println!("{}", "-".repeat(53));
+    println!("zk-stark-vm — scaling benchmark");
+    println!("(blinding on: trace polynomials are masked before commitment)\n");
+    println!("{:>6} {:>7} {:>7} {:>12} {:>12} {:>12}", "n", "rows", "blowup", "prove", "verify", "proof");
+    println!("{}", "-".repeat(61));
 
     let mut results = Vec::new();
     for &n in &INPUTS {
         let m = measure(n, &config);
         println!(
-            "{:>6} {:>7} {:>10.2}ms {:>10.2}ms {:>9.1}KiB",
+            "{:>6} {:>7} {:>6}x {:>10.2}ms {:>10.2}ms {:>9.1}KiB",
             m.n,
             m.rows,
+            m.blowup,
             m.prove_ms,
             m.verify_ms,
             m.proof_bytes as f64 / 1024.0
@@ -78,28 +81,51 @@ fn main() {
         results.push(m);
     }
 
-    let first = results.first().expect("at least one measurement");
+    // Only compare across a shared blowup: spanning that boundary would mix
+    // "the trace got longer" with "the domain got wider".
     let last = results.last().expect("at least one measurement");
+    let first = results
+        .iter()
+        .filter(|m| m.blowup == last.blowup)
+        .min_by_key(|m| m.rows)
+        .expect("at least one measurement");
     let trace_growth = last.rows as f64 / first.rows as f64;
     let prove_growth = last.prove_ms / first.prove_ms;
     let verify_growth = last.verify_ms / first.verify_ms;
     let size_growth = last.proof_bytes as f64 / first.proof_bytes as f64;
 
-    println!("\nacross this range the trace grew {trace_growth:.0}x:");
+    println!("\nfrom {} to {} rows (both at {}x blowup) the trace grew {trace_growth:.0}x:", first.rows, last.rows, last.blowup);
     println!("  prove time   grew {prove_growth:>5.1}x  (quasilinear in trace length)");
     println!("  verify time  grew {verify_growth:>5.1}x  (logarithmic — this is succinctness)");
     println!("  proof size   grew {size_growth:>5.1}x  (logarithmic)");
+
+    // What privacy costs: blinding adds a fixed degree, so short traces pay most.
+    let plain = StarkConfig::toy_without_blinding();
+    println!("\ncost of blinding (vs. the same parameters with it off):");
+    println!("{:>6} {:>7} {:>16} {:>14} {:>14}", "n", "rows", "blowup", "prove", "proof");
+    println!("{}", "-".repeat(61));
+    for &n in &INPUTS {
+        let blinded = results.iter().find(|m| m.n == n).expect("measured above");
+        let bare = measure(n, &plain);
+        println!(
+            "{:>6} {:>7} {:>7}x -> {:>2}x {:>12} {:>13}",
+            n,
+            bare.rows,
+            bare.blowup,
+            blinded.blowup,
+            format!("{:+.0}%", (blinded.prove_ms / bare.prove_ms - 1.0) * 100.0),
+            format!("{:+.0}%", (blinded.proof_bytes as f64 / bare.proof_bytes as f64 - 1.0) * 100.0),
+        );
+    }
 
     std::fs::write(&out_path, render_svg(&results)).expect("writing chart");
     println!("\nchart written to {out_path}");
 }
 
-
-
 const WIDTH: f64 = 900.0;
 const HEIGHT: f64 = 620.0;
 const LEFT: f64 = 95.0;
-const RIGHT: f64 = WIDTH - 190.0; 
+const RIGHT: f64 = WIDTH - 190.0;
 
 const TIME_TOP: f64 = 70.0;
 const TIME_BOTTOM: f64 = 330.0;
@@ -112,11 +138,9 @@ fn time_y(ms: f64) -> f64 {
     TIME_BOTTOM - t * (TIME_BOTTOM - TIME_TOP)
 }
 
-
 fn size_y(kib: f64) -> f64 {
     SIZE_BOTTOM - (kib / 300.0) * (SIZE_BOTTOM - SIZE_TOP)
 }
-
 
 fn x_at(i: usize, count: usize) -> f64 {
     LEFT + (i as f64 / (count - 1) as f64) * (RIGHT - LEFT)
@@ -207,7 +231,6 @@ fn render_svg(results: &[Measurement]) -> String {
         vy + 5.0
     ));
 
-
     let first = &results[0];
     let last = &results[count - 1];
     let trace_growth = last.rows as f64 / first.rows as f64;
@@ -218,7 +241,6 @@ fn render_svg(results: &[Measurement]) -> String {
         vx + 14.0,
         vy + 26.0
     ));
-
 
     s.push_str(&format!(
         "<text x=\"{LEFT}\" y=\"{:.1}\" font-size=\"14\" font-weight=\"600\" fill=\"#16161a\">Proof size</text>",

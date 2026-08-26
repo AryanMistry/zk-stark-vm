@@ -1,4 +1,5 @@
-//! Turns a program run into the execution trace `VmAir`'s constraints are  checked against: one row per clock cycle, columns laid out below.
+//! A program run turned into an execution trace: one row per clock cycle,
+//! columns laid out below.
 
 use super::{Instruction, NUM_MEMORY, NUM_REGISTERS, Opcode};
 use crate::field::Fp;
@@ -32,10 +33,10 @@ fn one_hot(len: usize, index: usize) -> Vec<Fp> {
     v
 }
 
-/// Runs `program` on `input` (placed in memory[0]) and records the full execution trace, padded with repeated halt-rows to a power-of-two
-/// length. Returns the trace and the program's output (memory[1] after halting).
+/// Runs `program` on `input` (memory[0]), padding with halt-rows to a power of two.
+/// Returns the trace and the output left in memory[1].
 pub fn generate_trace(program: &[Instruction], input: Fp) -> (TraceTable, Fp) {
-    // Fixed VM reset state: r0=0, r1=1, r2=0, r3=1 
+    // Fixed VM reset state: r0=0, r1=1, r2=0, r3=1.
     let mut registers = [Fp::ZERO; NUM_REGISTERS];
     registers[super::REG_ONE] = Fp::ONE;
     registers[super::REG_B] = Fp::ONE;

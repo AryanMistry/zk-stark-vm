@@ -1,14 +1,7 @@
 //! The Goldilocks field: F_p for p = 2^64 - 2^32 + 1.
 //!
-//! This prime is used by Plonky2/Winterfell because it fits in a u64 while
-//! still admitting a specialized reduction (no generic 128-bit `%`), and its
-//! multiplicative group has 2-adicity 32 (a subgroup of order 2^32), which is
-//! exactly what NTT-based polynomial arithmetic needs later.
-//!
-//! Reduction derivation: since p = 2^64 - 2^32 + 1, we have 2^64 = p + (2^32 - 1),
-//! so 2^64 mod p = 2^32 - 1. Writing EPSILON = 2^32 - 1, every time a computation
-//! would carry a factor of 2^64, that factor can be replaced by EPSILON instead of
-//! doing a full division.
+//! Fits in a u64, has 2-adicity 32 for the NTT, and since 2^64 mod p = 2^32 - 1
+//! (= EPSILON), reduction replaces any factor of 2^64 with EPSILON instead of dividing.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -56,11 +49,7 @@ impl Fp {
         }
     }
 
-    /// Reduces a 128-bit product into a canonical field element.
-    ///
-    /// Splits x = x_hi * 2^64 + x_lo, then x_hi = x_hi_hi * 2^32 + x_hi_lo.
-    /// Using 2^64 ≡ EPSILON (mod p) twice gives:
-    ///   x ≡ x_lo - x_hi_hi + x_hi_lo * EPSILON  (mod p)
+    /// Reduces a 128-bit product: x ≡ x_lo - x_hi_hi + x_hi_lo * EPSILON (mod p).
     #[inline]
     fn reduce128(x: u128) -> Self {
         let x_lo = x as u64;
@@ -68,11 +57,11 @@ impl Fp {
         let x_hi_hi = x_hi >> 32;
         let x_hi_lo = x_hi & EPSILON;
 
-        // t0 = x_lo - x_hi_hi (mod p); x_hi_hi < 2^32 so this underflows at most once.
+        // x_hi_hi < 2^32, so this underflows at most once.
         let (diff, borrow) = x_lo.overflowing_sub(x_hi_hi);
         let t0 = if borrow { diff.wrapping_sub(EPSILON) } else { diff };
 
-        // t1 = x_hi_lo * EPSILON; both factors < 2^32 so this fits in u64 with room to spare.
+        // Both factors < 2^32, so this fits in a u64.
         let t1 = x_hi_lo * EPSILON;
 
         let (sum, overflow) = t0.overflowing_add(t1);
@@ -95,8 +84,7 @@ impl Fp {
     }
 }
 
-/// Inverts every element of `values` (all must be nonzero) using Montgomery's
-/// batch inversion trick.
+/// Montgomery batch inversion: one `inv` plus O(n) muls. All inputs must be nonzero.
 pub fn batch_inverse(values: &[Fp]) -> Vec<Fp> {
     let n = values.len();
     let mut prefix = Vec::with_capacity(n);
@@ -199,8 +187,7 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
-    /// A slow-but-obviously-correct reference reduction, used only to
-    /// cross-check the fast path in tests.
+    /// Obviously-correct reference reduction, to cross-check the fast path.
     fn naive_reduce(x: u128) -> u64 {
         (x % (P as u128)) as u64
     }

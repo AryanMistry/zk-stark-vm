@@ -1,8 +1,7 @@
 //! Merkle tree over field-element leaves, hashed with blake3.
 //!
-//! Leaf and internal-node hashes are domain-separated with a leading tag
-//! byte, so a leaf hash can never be replayed as an internal node hash (or
-//! vice versa) to forge a path.
+//! A leading tag byte domain-separates leaf from node hashes, so neither can be
+//! replayed as the other to forge a path.
 
 use crate::field::Fp;
 use serde::{Deserialize, Serialize};
@@ -29,9 +28,7 @@ fn hash_node(left: &Digest, right: &Digest) -> Digest {
     *hasher.finalize().as_bytes()
 }
 
-/// A Merkle tree over a power-of-two number of leaves, each leaf being a
-/// row of field elements (e.g. one column-slice of a trace at a given
-/// evaluation point).
+/// Power-of-two leaves, each a row of field elements.
 pub struct MerkleTree {
     /// layers[0] = leaf hashes, layers.last() = [root].
     layers: Vec<Vec<Digest>>,
@@ -59,8 +56,7 @@ impl MerkleTree {
         self.layers[0].len()
     }
 
-    /// Authentication path for the leaf at `index`, from the leaf up to
-    /// (but not including) the root.
+    /// Authentication path from the leaf at `index` up to (not including) the root.
     pub fn open(&self, index: usize) -> MerkleProof {
         assert!(index < self.num_leaves(), "leaf index out of range");
         let mut siblings = Vec::with_capacity(self.layers.len() - 1);
@@ -73,9 +69,8 @@ impl MerkleTree {
     }
 }
 
-/// An authentication path. Verification recomputes the leaf hash from the
-/// claimed values, so a proof is only meaningful together with the leaf
-/// values it's checked against — it doesn't carry them itself.
+/// An authentication path. It carries no leaf values — verification recomputes the
+/// leaf hash from whatever values it's checked against.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MerkleProof {
     pub index: usize,

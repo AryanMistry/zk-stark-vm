@@ -1,7 +1,4 @@
-//! Dense univariate polynomials over the Goldilocks field.
-//!
-//! Coefficients are stored lowest-degree first. `mul` dispatches to the
-
+//! Dense univariate polynomials over Goldilocks, coefficients lowest-degree first.
 
 use crate::field::Fp;
 use crate::ntt;
@@ -9,8 +6,7 @@ use std::ops::{Add, Neg, Sub};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Poly {
-    /// coeffs[i] is the coefficient of x^i. Normalized: no trailing zero
-    /// coefficient, except that the zero polynomial is represented as `[]`.
+    /// coeffs[i] is the coefficient of x^i. No trailing zeros; zero poly is `[]`.
     pub coeffs: Vec<Fp>,
 }
 
@@ -56,7 +52,7 @@ impl Poly {
         Poly::new(self.coeffs.iter().map(|&x| x * c).collect())
     }
 
-    /// O(n^2) multiplication. Only used to cross-check `mul` in
+    /// O(n^2) multiplication, kept to cross-check the NTT path in tests.
     pub fn naive_mul(&self, other: &Poly) -> Poly {
         if self.is_zero() || other.is_zero() {
             return Poly::zero();
@@ -78,7 +74,7 @@ impl Poly {
         ntt::poly_mul_ntt(self, other)
     }
 
-    /// Polynomial long division: `self = quotient * divisor + remainder`,
+    /// Long division: `self = quotient * divisor + remainder`.
     pub fn div_rem(&self, divisor: &Poly) -> (Poly, Poly) {
         assert!(!divisor.is_zero(), "division by the zero polynomial");
         let div_deg = divisor.degree().unwrap();

@@ -1,7 +1,4 @@
-//! End-to-end demo: compile the toy VM's fibonacci-via-loop program, run
-//! it, generate a STARK proof of correct execution, serialize it, verify
-//! it, and report proof size and prover/verifier timings.
-
+//! End-to-end demo: run the fibonacci program, prove it, verify it, report sizes.
 
 use std::time::Instant;
 
@@ -44,13 +41,20 @@ fn main() {
     println!("prove time:     {prove_time:?}");
     println!("verify time:    {verify_time:?}");
     println!("proof size:     {} bytes ({:.1} KiB)", proof_bytes.len(), proof_bytes.len() as f64 / 1024.0);
+    println!("blinding:       {} ({} random coefficients per column)", config.blinding, config.blinding_degree());
     println!("verified:       {honest_result}\n");
     assert!(honest_result, "honest proof failed to verify — this is a bug");
+
+    // Blinding is visible: the same trace proves twice to two different proofs.
+    let second = prover::prove(&air, &trace.rows, &config);
+    let second_bytes = bincode::serialize(&second).expect("proof serialization");
+    println!("re-proving the same trace gives a different proof: {}", second_bytes != proof_bytes);
+    println!("  ...and it still verifies: {}", verifier::verify(&air, trace_len, &second, &config));
 
     let mut tampered = proof;
     tampered.ood_current[0] += Fp::ONE;
     let tampered_result = verifier::verify(&air, trace_len, &tampered, &config);
-    println!("tampered proof verified: {tampered_result} (expected: false)");
+    println!("\ntampered proof verified: {tampered_result} (expected: false)");
     assert!(!tampered_result, "tampered proof was accepted — this is a soundness bug");
 
     println!("\nall checks passed.");

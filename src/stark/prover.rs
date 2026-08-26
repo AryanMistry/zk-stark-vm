@@ -1,6 +1,4 @@
-//! Trace -> low-degree extension -> commitment -> composition polynomial
-//! -> FRI proof. See `stark/mod.rs` for the shared composition logic and
-//! `air.rs`/`vm/constraints.rs` for what's actually being proven.
+//! Trace -> LDE -> commitment -> composition polynomial -> FRI proof.
 
 use super::{CompositionContext, LDE_OFFSET, StarkConfig, StarkProof, TraceOpening};
 use crate::air::Air;
@@ -8,9 +6,36 @@ use crate::field::Fp;
 use crate::fri::{self, FriConfig, FriProof};
 use crate::merkle::MerkleTree;
 use crate::ntt;
+use crate::poly::Poly;
 use crate::transcript::Transcript;
 
+/// Adds `r(x) * (x^n - 1)`, `r` random of degree `< k`: zero at every trace row so
+/// constraints are untouched, nonzero on the LDE coset so openings are masked.
+fn blind(poly: &Poly, n: usize, k: usize, rng: &mut impl rand::Rng) -> Poly {
+    if k == 0 {
+        return poly.clone();
+    }
+    let mut coeffs = poly.coeffs.clone();
+    coeffs.resize(n + k, Fp::ZERO);
+    for i in 0..k {
+        let c = Fp::random(rng);
+        coeffs[i] -= c;
+        coeffs[i + n] += c;
+    }
+    Poly::new(coeffs)
+}
+
 pub fn prove<A: Air>(air: &A, trace: &[Vec<Fp>], config: &StarkConfig) -> StarkProof {
+    prove_with_rng(air, trace, config, &mut rand::rng())
+}
+
+/// Proving with a supplied RNG, so blinded proofs are reproducible in tests.
+pub fn prove_with_rng<A: Air>(
+    air: &A,
+    trace: &[Vec<Fp>],
+    config: &StarkConfig,
+    rng: &mut impl rand::Rng,
+) -> StarkProof {
     let n = trace.len();
     assert!(n.is_power_of_two());
     let log_n = n.trailing_zeros();
@@ -19,23 +44,23 @@ pub fn prove<A: Air>(air: &A, trace: &[Vec<Fp>], config: &StarkConfig) -> StarkP
         assert_eq!(row.len(), width);
     }
 
-    // 1. Interpolate every trace column into a polynomial.
+    // 1. Interpolate every trace column, then blind it against leaking.
+    let k = config.blinding_degree();
     let trace_polys: Vec<_> = (0..width)
         .map(|j| {
             let column: Vec<Fp> = trace.iter().map(|row| row[j]).collect();
-            ntt::interpolate_subgroup(&column)
+            blind(&ntt::interpolate_subgroup(&column), n, k, rng)
         })
         .collect();
 
-    // 2. Low-degree-extend every column onto the (larger) coset domain.
-    let log_m = log_n + config.lde_blowup.trailing_zeros();
+    // 2. Low-degree-extend onto the coset domain, sized for the blinded degree.
+    let blowup = config.lde_blowup(n, air.max_constraint_degree());
+    let log_m = log_n + blowup.trailing_zeros();
     let m = 1usize << log_m;
-    let blowup = config.lde_blowup;
     let domain = ntt::coset_domain(log_m, LDE_OFFSET);
     let trace_lde: Vec<Vec<Fp>> = trace_polys.iter().map(|p| ntt::coset_lde(p, log_m, LDE_OFFSET)).collect();
 
-    // 3. Commit the trace LDE: one leaf per domain point, holding every
-    // column's value there, so one Merkle proof opens a whole row.
+    // 3. Commit the LDE: one leaf per domain point, so one proof opens a row.
     let leaves: Vec<Vec<Fp>> = (0..m).map(|i| (0..width).map(|j| trace_lde[j][i]).collect()).collect();
     let trace_tree = MerkleTree::new(&leaves);
     let trace_root = trace_tree.root();
@@ -54,8 +79,7 @@ pub fn prove<A: Air>(air: &A, trace: &[Vec<Fp>], config: &StarkConfig) -> StarkP
     transcript.absorb_fps(&ood_current);
     transcript.absorb_fps(&ood_next);
 
-    // 6. Random coefficients combining every constraint (and every
-    // per-column DEEP consistency check) into one polynomial.
+    // 6. Random coefficients folding every constraint into one polynomial.
     let boundary_constraints = air.boundary_constraints();
     let alphas = transcript.challenge_fps(air.num_transition_constraints());
     let betas = transcript.challenge_fps(boundary_constraints.len());
@@ -104,9 +128,7 @@ pub fn prove<A: Air>(air: &A, trace: &[Vec<Fp>], config: &StarkConfig) -> StarkP
     let fri_proof =
         FriProof { layer_roots: commitment.layer_roots, final_evals: commitment.final_evals, query_proofs };
 
-    // 9. Open the trace commitment at the exact same query indices, so the
-    // verifier can recompute the composition value FRI claims and check it
-    // was really derived from the committed trace.
+    // 9. Open the trace at the same indices, so the verifier can recheck FRI's claim.
     let trace_openings = query_indices
         .iter()
         .map(|&idx| {

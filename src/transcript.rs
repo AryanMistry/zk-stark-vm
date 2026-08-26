@@ -1,12 +1,6 @@
-//! Fiat-Shamir transcript: turns the interactive protocol (prover sends a
-//! commitment, verifier sends a random challenge, repeat) into a
-//! non-interactive one, by deriving "random" challenges deterministically
-//! from everything absorbed so far.
+//! Fiat-Shamir: challenges derived by hashing everything absorbed so far.
 //!
-//! Built as a simple sponge-like construction over blake3: absorbed data
-//! feeds an internal hasher; squeezing a challenge reads bytes from that
-//! hasher's XOF output and then re-absorbs them, so the state ratchets and
-//! two squeezes never repeat.
+//! A blake3 sponge — squeezing re-absorbs its output, so two squeezes never repeat.
 
 use crate::field::{Fp, P};
 
@@ -15,8 +9,7 @@ pub struct Transcript {
 }
 
 impl Transcript {
-    /// `label` domain-separates this transcript from transcripts used for
-    /// unrelated protocols (or future protocol versions).
+    /// `label` domain-separates this from transcripts of other protocols.
     pub fn new(label: &[u8]) -> Self {
         let mut hasher = blake3::Hasher::new();
         hasher.update(label);
@@ -41,8 +34,7 @@ impl Transcript {
         self.absorb_bytes(digest);
     }
 
-    /// Reads `out.len()` pseudorandom bytes derived from the current state,
-    /// then folds them back in so the next squeeze produces different bytes.
+    /// Reads pseudorandom bytes, then folds them back in so the next squeeze differs.
     fn squeeze(&mut self, out: &mut [u8]) {
         let mut xof = self.hasher.finalize_xof();
         xof.fill(out);
@@ -55,9 +47,7 @@ impl Transcript {
         out
     }
 
-    /// A uniformly random field element, via rejection sampling on 8-byte
-    /// draws (same approach as `Fp::random`, just seeded from the
-    /// transcript instead of an RNG).
+    /// Uniform field element via rejection sampling, seeded from the transcript.
     pub fn challenge_fp(&mut self) -> Fp {
         loop {
             let mut buf = [0u8; 8];
@@ -73,8 +63,7 @@ impl Transcript {
         (0..n).map(|_| self.challenge_fp()).collect()
     }
 
-    /// A uniformly random index in `0..bound`. `bound` must be a power of
-    /// two (true of every domain size in this codebase), so masking is exact.
+    /// Uniform index in `0..bound`. Power-of-two `bound`, so masking is exact.
     pub fn challenge_index(&mut self, bound: usize) -> usize {
         assert!(bound.is_power_of_two(), "challenge_index requires a power-of-two bound");
         let mut buf = [0u8; 8];

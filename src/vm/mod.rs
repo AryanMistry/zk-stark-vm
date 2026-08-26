@@ -1,6 +1,7 @@
 //! A tiny register VM: the computation whose execution the STARK proves.
 //!
-//! 6 registers, a 2-word memory, and 8 opcodes. `trace::generate_trace` both runs a program and records the execution trace `constraints::VmAir`'s constraints are checked against.
+//! 6 registers, a 2-word memory, 8 opcodes. `trace::generate_trace` runs a program
+//! and records the trace that `constraints::VmAir` is checked against.
 
 pub mod constraints;
 pub mod trace;
@@ -68,7 +69,8 @@ impl Instruction {
     }
 }
 
-/// Computes fibonacci(n) via a real loop: LOADs the input from memory, counts down while accumulating (a, b) = (F(k), F(k+1)), STOREs the result.
+/// fibonacci(n) via a real loop: LOAD the input, count down accumulating
+/// (a, b) = (F(k), F(k+1)), STORE the result.
 pub fn fibonacci_program() -> Vec<Instruction> {
     use Opcode::*;
     vec![

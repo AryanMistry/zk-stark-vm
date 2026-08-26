@@ -1,8 +1,5 @@
-//! Replays the prover's transcript to independently derive the same OOD
-//! point, combination coefficients, and FRI query indices, then checks:
-//! trace openings verify against the committed root, the composition value
-//! FRI claims at each query matches what those opened trace values (plus
-//! the public OOD frame) recompute, and FRI's own fold-consistency holds.
+//! Replays the prover's transcript to re-derive every challenge, then checks the
+//! trace openings, the composition value FRI claims, and FRI's fold consistency.
 
 use super::{CompositionContext, LDE_OFFSET, StarkConfig, StarkProof};
 use crate::air::Air;
@@ -62,9 +59,10 @@ pub fn verify<A: Air>(air: &A, trace_len: usize, proof: &StarkProof, config: &St
         gammas_next,
     };
 
-    let log_m = log_n + config.lde_blowup.trailing_zeros();
+    // Derived, not read off the proof: the prover can't pick a weaker domain.
+    let blowup = config.lde_blowup(n, air.max_constraint_degree());
+    let log_m = log_n + blowup.trailing_zeros();
     let m = 1usize << log_m;
-    let blowup = config.lde_blowup;
     let domain = ntt::coset_domain(log_m, LDE_OFFSET);
 
     let fri_config = FriConfig { blowup_factor: config.fri_rate, num_queries: config.num_queries };

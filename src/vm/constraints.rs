@@ -1,7 +1,5 @@
-//! `VmAir`: transition + boundary constraints for the toy VM, as literal
-//! polynomial relations over trace row values — see `trace.rs` for the
-//! column layout these index into.
-
+//! `VmAir`: the toy VM's constraints as polynomial relations over trace rows.
+//! See `trace.rs` for the column layout these index into.
 
 use super::trace::*;
 use super::{Instruction, NUM_MEMORY, NUM_REGISTERS, Opcode, REG_ZERO};
@@ -13,9 +11,7 @@ pub struct VmAir {
     pub output: Fp,
     pub last_row: usize,
     program: Vec<Instruction>,
-    // Precomputed once per program: the
-    // constant vector, indexed by program address, that each instruction
-    // field's fetch-consistency constraint dot-products against.
+    // Per-program constants, indexed by address, that fetch constraints dot against.
     prog_opcode: Vec<Fp>,
     prog_dst: Vec<Fp>,
     prog_a: Vec<Fp>,
@@ -47,6 +43,11 @@ fn dot(sel: &[Fp], values: &[Fp]) -> Fp {
 impl Air for VmAir {
     fn trace_width(&self) -> usize {
         trace_width(self.program.len())
+    }
+
+    /// 4: JMPIF's `op_flag * val_a * val_a_inv * pc_next`. All others are <= 3.
+    fn max_constraint_degree(&self) -> usize {
+        4
     }
 
     fn transition_constraints(&self, c: &[Fp], n: &[Fp]) -> Vec<Fp> {
@@ -135,9 +136,7 @@ impl Air for VmAir {
             cs.push(n[COL_MEM + k] - expected);
         }
 
-        // --- instruction fetch: bind this row's opcode/operand selectors to
-        // the fixed public program, via a one-hot selector over program
-        // addresses. ---
+        // --- instruction fetch: bind selectors to the public program via one-hot ---
         let prog_sel: Vec<Fp> = (0..self.program.len()).map(|k| c[COL_PROG_SEL + k]).collect();
         for &s in &prog_sel {
             cs.push(s * (s - Fp::ONE));

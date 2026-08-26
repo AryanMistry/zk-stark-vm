@@ -1,8 +1,6 @@
-//! Number-theoretic transform over the Goldilocks field, and the
-//! polynomial operations built on top of it: fast multiplication, subgroup
-//! interpolation, and coset low-degree extension.
+//! NTT over Goldilocks: fast multiplication, subgroup interpolation, coset LDE.
 //!
-//! `p - 1 = 2^32 * (2^32 - 1)`, so F_p* has a subgroup of order 2^k for every k <= 32 
+//! `p - 1 = 2^32 * (2^32 - 1)`, so F_p* has a subgroup of order 2^k for every k <= 32.
 
 use crate::field::{Fp, P};
 use crate::poly::Poly;
@@ -40,7 +38,7 @@ pub fn coset_domain(log_n: u32, offset: Fp) -> Vec<Fp> {
 fn bit_reverse_permute(a: &mut [Fp]) {
     let n = a.len();
     if n <= 1 {
-        return; 
+        return;
     }
     let bits = n.trailing_zeros();
     for i in 0..n {
@@ -95,14 +93,14 @@ pub fn intt(a: &mut [Fp]) {
     ntt_core(a, true);
 }
 
-/// Interpolates evaluations over the size-n subgroup domain back into a polynomial. `evals.len()` must be a power of two.
+/// Subgroup evaluations -> polynomial. `evals.len()` must be a power of two.
 pub fn interpolate_subgroup(evals: &[Fp]) -> Poly {
     let mut coeffs = evals.to_vec();
     intt(&mut coeffs);
     Poly::new(coeffs)
 }
 
-/// Multiplies two polynomials via NTT: pads to the next power of two large enough to hold the product, transforms, multiplies pointwise, inverts.
+/// Multiplies via NTT: pad to a power of two, transform, multiply pointwise, invert.
 pub fn poly_mul_ntt(a: &Poly, b: &Poly) -> Poly {
     if a.is_zero() || b.is_zero() {
         return Poly::zero();
@@ -126,8 +124,7 @@ pub fn poly_mul_ntt(a: &Poly, b: &Poly) -> Poly {
     Poly::new(fa)
 }
 
-/// Low-degree extension: evaluates `poly` over the coset
-/// `{offset * w^i : i in 0..2^log_l}` without evaluating point-by-point.
+/// Evaluates `poly` over the coset `{offset * w^i}` without going point-by-point.
 pub fn coset_lde(poly: &Poly, log_l: u32, offset: Fp) -> Vec<Fp> {
     let l = 1usize << log_l;
     assert!(
